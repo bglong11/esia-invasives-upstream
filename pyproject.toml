@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esia-invasives-upstream"
+version = "0.1.0"
+description = "Upstream Pipeline for the ESIA invasives_baseline Discipline — GBIF + GRIIS query and analytical primitives."
+requires-python = ">=3.10"
+dependencies = [
+  "requests",
+  "pandas",
+  "geopandas",
+  "shapely",
+  "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "requests-mock"]
+
+[tool.setuptools]
+package-dir = {"esia_invasives_upstream" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
