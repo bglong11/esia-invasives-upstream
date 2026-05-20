@@ -18,7 +18,7 @@ See `CLAUDE.md` for architectural rules and the governing ADR-0015 in the parent
 ## Usage
 
 ```python
-from pipeline import run
+from src.pipeline import run
 
 run(
     aoi_geojson="path/to/aoi.geojson",
