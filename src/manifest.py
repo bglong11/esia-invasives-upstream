@@ -60,3 +60,18 @@ def write_manifest(
     out = bundle_dir / "manifest.json"
     out.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return out
+
+
+def verify_manifest(bundle_dir: Path) -> list[str]:
+    """Recompute each artefact's SHA256 against manifest.json; return kinds
+    that are missing or hash-mismatched. Empty list = bundle intact."""
+    bundle_dir = Path(bundle_dir)
+    bundle_resolved = bundle_dir.resolve()
+    manifest = json.loads((bundle_dir / "manifest.json").read_text())
+
+    mismatched: list[str] = []
+    for entry in manifest["artefacts"]:
+        p = (bundle_dir / entry["path"]).resolve()
+        if not p.is_relative_to(bundle_resolved) or not p.is_file() or _sha256(p) != entry["sha256"]:
+            mismatched.append(entry["kind"])
+    return mismatched
