@@ -23,6 +23,8 @@ log = logging.getLogger(__name__)
 
 GBIF_API = "https://api.gbif.org/v1"
 GBIF_LIMIT = 300
+# GBIF rejects any search request where offset + limit exceeds this.
+GBIF_MAX_OFFSET = 100_000
 REQUEST_TIMEOUT = 30
 MAX_GRIIS_SPECIES = 5_000
 ESTABLISHMENT_MEANS: tuple[str, ...] = ("INVASIVE", "INTRODUCED", "NATURALISED")
@@ -39,6 +41,39 @@ GRIIS_KEEP_COLS = (
     "order", "family", "genus", "taxonomicStatus", "rank",
     "establishmentMeans", "degreeOfEstablishment",
 )
+
+
+def _assert_download_complete(est: str, fetched: int, reported_total: Optional[int],
+                              max_records: int, allow_partial: bool) -> None:
+    """Compare what we paged against GBIF's own ``count``.
+
+    The paging loop is bounded, and hitting that bound is indistinguishable
+    from a clean finish — so without this an AOI with more occurrences than the
+    cap silently under-reports invasive species. GBIF's ``count`` is derived
+    server-side, independently of our paging.
+
+    Fails closed when ``count`` is absent: with no oracle we cannot claim the
+    download is complete, and claiming it anyway is the defect being fixed.
+    """
+    if type(reported_total) is int and fetched >= reported_total:
+        return
+
+    if not type(reported_total) is int:
+        msg = (f"GBIF response for establishmentMeans={est} carried no usable "
+               f"'count', so download completeness cannot be verified.")
+    else:
+        msg = (f"GBIF reported {reported_total} occurrences for "
+               f"establishmentMeans={est} but only {fetched} were retrieved "
+               f"(max_records={max_records}, GBIF ceiling={GBIF_MAX_OFFSET}).")
+
+    if allow_partial:
+        log.warning("%s Proceeding with a partial download.", msg)
+        return
+    raise RuntimeError(
+        f"{msg} Narrow the AOI or use GBIF's asynchronous download service "
+        "beyond the paging ceiling; proceeding would under-report invasive "
+        "species. Pass allow_partial=True to override."
+    )
 
 
 class GBIFDownloader:
@@ -63,29 +98,45 @@ class GBIFDownloader:
         wkt: str,
         establishment_means: Iterable[str] = ESTABLISHMENT_MEANS,
         max_records: int = 100_000,
+        allow_partial: bool = False,
     ) -> gpd.GeoDataFrame:
         """Query GBIF for occurrences within ``wkt`` filtered by establishmentMeans.
 
         Returns a GeoDataFrame (EPSG:4326) of points, deduplicated on
         (species, lat, lon). Empty-but-schema-valid if no matches.
+
+        Raises ``RuntimeError`` when GBIF reports more matching occurrences
+        than were retrieved. Pass ``allow_partial`` to warn and proceed instead.
         """
         rows: list[dict] = []
         for est in establishment_means:
             log.info("GBIF occurrence search: establishmentMeans=%s", est)
-            offset = 0
-            while offset < max_records:
+            fetched = 0
+            reported_total: Optional[int] = None
+            # GBIF rejects offset + limit > GBIF_MAX_OFFSET, so the ceiling
+            # bounds requests as well as results; the last page is shortened to
+            # land exactly on it rather than overshooting into an HTTP error.
+            ceiling = min(max_records, GBIF_MAX_OFFSET)
+            while fetched < ceiling:
                 page = self._get("occurrence/search", {
                     "geometry": wkt,
                     "establishmentMeans": est,
                     "hasCoordinate": "true",
-                    "limit": GBIF_LIMIT,
-                    "offset": offset,
+                    "limit": min(GBIF_LIMIT, ceiling - fetched),
+                    "offset": fetched,
                 })
+                if reported_total is None:
+                    reported_total = page.get("count")
+                    if type(reported_total) is int:
+                        ceiling = min(ceiling, reported_total)
                 results = page.get("results", [])
                 rows.extend(results)
-                if page.get("endOfRecords", True) or not results:
+                fetched += len(results)
+                # Default False: a missing endOfRecords must not read as "done".
+                if page.get("endOfRecords", False) or not results:
                     break
-                offset += GBIF_LIMIT
+            _assert_download_complete(est, fetched, reported_total,
+                                      max_records, allow_partial)
 
         df = pd.DataFrame(rows)
         if df.empty:

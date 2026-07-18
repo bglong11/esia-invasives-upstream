@@ -66,6 +66,7 @@ def run(
     output_root: str | Path = "data/outputs",
     downloader: Optional[GBIFDownloader] = None,
     max_records: int = 100_000,
+    allow_partial: bool = False,
 ) -> Path:
     """Run the invasives pipeline end-to-end.
 
@@ -77,6 +78,9 @@ def run(
         output_root: Root under which ``<project>/invasives/<year>/`` is created.
         downloader: Optional ``GBIFDownloader`` (defaults to a fresh instance).
         max_records: Cap on GBIF occurrence rows per establishmentMeans class.
+        allow_partial: Downgrade an incomplete GBIF download from an error to a
+            warning. Off by default — an incomplete download under-reports
+            invasive species without saying so.
 
     Returns:
         Path to the written bundle directory.
@@ -92,7 +96,8 @@ def run(
 
     dl = downloader or GBIFDownloader()
 
-    gdf = dl.query_occurrences(wkt, max_records=max_records)
+    gdf = dl.query_occurrences(wkt, max_records=max_records,
+                               allow_partial=allow_partial)
     griis_df = dl.fetch_griis_checklist(country_name) if country_name else None
 
     griis_names = _griis_species_names(griis_df)
