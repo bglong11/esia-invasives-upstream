@@ -99,3 +99,135 @@ def test_fetch_griis_checklist_no_species_returns_empty():
 def test_gbif_api_pinned():
     """Pin the base URL — accidental drift is a one-way data shift."""
     assert GBIF_API == "https://api.gbif.org/v1"
+
+
+def test_truncated_gbif_page_raises_rather_than_silently_under_reporting():
+    """GBIF reporting more records than we retrieved must not pass silently.
+
+    The paging loop is bounded by ``max_records``. Hitting that bound looked
+    identical to a complete download, so an AOI with more occurrences than the
+    cap silently under-reported invasive species. GBIF's own ``count`` is the
+    available oracle — a total derived by the server, not by our paging.
+    """
+    records = make_synthetic_occurrence_records(100)  # 3 species x 100 = 300 = GBIF_LIMIT
+    with requests_mock.Mocker() as m:
+        # Server insists there are 1000 matches; every page says "more to come".
+        page = mock_occurrence_page(records, end=False)
+        page["count"] = 1000
+        m.get(f"{GBIF_API}/occurrence/search", json=page)
+
+        dl = GBIFDownloader()
+        with pytest.raises(RuntimeError, match="1000"):
+            dl.query_occurrences(WKT, establishment_means=["INTRODUCED"],
+                                 max_records=600)
+
+
+def test_allow_partial_downgrades_truncation_to_a_warning(caplog):
+    """The escape hatch warns and proceeds — it does not invent a policy."""
+    records = make_synthetic_occurrence_records(100)  # 3 species x 100 = 300 = GBIF_LIMIT
+    with requests_mock.Mocker() as m:
+        page = mock_occurrence_page(records, end=False)
+        page["count"] = 1000
+        m.get(f"{GBIF_API}/occurrence/search", json=page)
+
+        dl = GBIFDownloader()
+        gdf = dl.query_occurrences(WKT, establishment_means=["INTRODUCED"],
+                                   max_records=600, allow_partial=True)
+    assert not gdf.empty
+    assert any("1000" in r.message for r in caplog.records)
+
+
+def test_complete_download_does_not_raise():
+    """A page that ends cleanly with count == retrieved stays silent."""
+    records = make_synthetic_occurrence_records(1)
+    with requests_mock.Mocker() as m:
+        m.get(f"{GBIF_API}/occurrence/search",
+              json=mock_occurrence_page(records, end=True))
+        dl = GBIFDownloader()
+        gdf = dl.query_occurrences(WKT, establishment_means=["INTRODUCED"])
+    assert len(gdf) == len(records)
+
+
+def test_paging_never_exceeds_gbif_offset_ceiling(monkeypatch):
+    """GBIF rejects offset + limit > GBIF_MAX_OFFSET.
+
+    The final page must be shortened to land exactly on the ceiling instead of
+    overshooting into an HTTP error. Ceiling is monkeypatched small so the
+    boundary is exercised without paging 100k records.
+    """
+    import download as dl_mod
+    monkeypatch.setattr(dl_mod, "GBIF_MAX_OFFSET", 500)
+
+    records = make_synthetic_occurrence_records(100)  # 300 per page
+    with requests_mock.Mocker() as m:
+        page = mock_occurrence_page(records, end=False)
+        page["count"] = 10_000
+        m.get(f"{GBIF_API}/occurrence/search", json=page)
+
+        dl = GBIFDownloader()
+        with pytest.raises(RuntimeError):
+            dl.query_occurrences(WKT, establishment_means=["INTRODUCED"],
+                                 max_records=100_000)
+
+        pairs = [(int(r.qs["offset"][0]), int(r.qs["limit"][0]))
+                 for r in m.request_history]
+        # Second page is shortened to land exactly on the ceiling.
+        assert pairs == [(0, 300), (300, 200)], pairs
+
+
+def test_page_size_respects_a_cap_smaller_than_one_page():
+    """max_records=1 must request 1 record, not a full 300-row page."""
+    records = make_synthetic_occurrence_records(1)
+    with requests_mock.Mocker() as m:
+        page = mock_occurrence_page(records, end=True)
+        page["count"] = 1
+        m.get(f"{GBIF_API}/occurrence/search", json=page)
+
+        dl = GBIFDownloader()
+        dl.query_occurrences(WKT, establishment_means=["INTRODUCED"],
+                             max_records=1)
+        assert int(m.request_history[0].qs["limit"][0]) == 1
+
+
+def test_missing_count_fails_closed():
+    """With no oracle we cannot claim completeness, so refuse to."""
+    records = make_synthetic_occurrence_records(1)
+    with requests_mock.Mocker() as m:
+        page = mock_occurrence_page(records, end=True)
+        del page["count"]
+        m.get(f"{GBIF_API}/occurrence/search", json=page)
+
+        dl = GBIFDownloader()
+        with pytest.raises(RuntimeError, match="count"):
+            dl.query_occurrences(WKT, establishment_means=["INTRODUCED"])
+
+
+def test_counts_do_not_leak_between_establishment_means():
+    """Each filter carries its own count; one must not satisfy another."""
+    records = make_synthetic_occurrence_records(1)
+
+    def _by_filter(request, context):
+        est = request.qs["establishmentmeans"][0].upper()
+        page = mock_occurrence_page(records, end=True)
+        # INTRODUCED is complete; NATURALISED claims far more than it returns.
+        page["count"] = len(records) if est == "INTRODUCED" else 9_999
+        return page
+
+    with requests_mock.Mocker() as m:
+        m.get(f"{GBIF_API}/occurrence/search", json=_by_filter)
+        dl = GBIFDownloader()
+        with pytest.raises(RuntimeError, match="9999|NATURALISED"):
+            dl.query_occurrences(WKT,
+                                 establishment_means=["INTRODUCED", "NATURALISED"])
+
+
+def test_count_of_true_is_not_a_usable_oracle():
+    """bool subclasses int — a malformed count must not satisfy the check."""
+    records = make_synthetic_occurrence_records(1)
+    with requests_mock.Mocker() as m:
+        page = mock_occurrence_page(records, end=True)
+        page["count"] = True
+        m.get(f"{GBIF_API}/occurrence/search", json=page)
+        dl = GBIFDownloader()
+        with pytest.raises(RuntimeError, match="count"):
+            dl.query_occurrences(WKT, establishment_means=["INTRODUCED"])

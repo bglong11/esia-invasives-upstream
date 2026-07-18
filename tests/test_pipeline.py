@@ -7,6 +7,7 @@ from pathlib import Path
 
 import geopandas as gpd
 import pandas as pd
+import pytest
 import requests_mock
 
 from _helpers import (
@@ -161,3 +162,27 @@ def test_pipeline_empty_gbif_writes_schema_valid_bundle(tmp_path: Path):
     # CSV has header but no data
     csv_rows = (bundle / "griis_checklist.csv").read_text().strip().splitlines()
     assert len(csv_rows) == 1  # header only
+
+
+def test_pipeline_forwards_allow_partial_to_downloader(tmp_path: Path):
+    """The escape hatch must reach the downloader, not just exist on it."""
+    aoi = write_aoi_geojson(tmp_path / "aoi.geojson")
+
+    class _Spy:
+        seen: dict = {}
+
+        def query_occurrences(self, wkt, **kwargs):
+            _Spy.seen = kwargs
+            raise RuntimeError("stop here — only the forwarding matters")
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        pipeline_mod.run(
+            aoi_geojson=aoi,
+            project="t",
+            country_name="Indonesia",
+            extraction_year=2026,
+            output_root=tmp_path / "out",
+            downloader=_Spy(),
+            allow_partial=True,
+        )
+    assert _Spy.seen.get("allow_partial") is True
