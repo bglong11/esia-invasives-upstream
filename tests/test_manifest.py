@@ -122,3 +122,27 @@ def test_verify_manifest_dotdot_traversal_escapes_bundle(tmp_path: Path):
     _write_raw_manifest(bundle, [{"kind": "escaped", "path": "../secret.txt", "sha256": _sha256(outside)}])
 
     assert verify_manifest(bundle) == ["escaped"]
+
+
+def test_verify_manifest_reports_symlink_loop_without_crashing(tmp_path):
+    """resolve() raises RuntimeError on a self-referential symlink.
+
+    A malformed manifest must be REPORTED, not crash the verifier whose whole
+    job is detecting malformed manifests — a crash is indistinguishable from a
+    broken tool.
+    """
+    import json as _json
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "loop").symlink_to(bundle / "loop")
+    (bundle / "manifest.json").write_text(_json.dumps({"artefacts": [{"path": "loop", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "kind": "k", "bytes": 1}]}))
+    assert verify_manifest(bundle) == ["k"]
+
+
+def test_verify_manifest_reports_embedded_nul_without_crashing(tmp_path):
+    """resolve() raises ValueError on a path containing a NUL byte."""
+    import json as _json
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "manifest.json").write_text(_json.dumps({"artefacts": [{"path": "a\u0000b", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "kind": "k", "bytes": 1}]}))
+    assert verify_manifest(bundle) == ["k"]

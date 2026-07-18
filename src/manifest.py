@@ -71,7 +71,16 @@ def verify_manifest(bundle_dir: Path) -> list[str]:
 
     mismatched: list[str] = []
     for entry in manifest["artefacts"]:
-        p = (bundle_dir / entry["path"]).resolve()
-        if not p.is_relative_to(bundle_resolved) or not p.is_file() or _sha256(p) != entry["sha256"]:
+        try:
+            p = (bundle_dir / entry["path"]).resolve()
+            intact = (p.is_relative_to(bundle_resolved) and p.is_file()
+                      and _sha256(p) == entry["sha256"])
+        except (OSError, RuntimeError, ValueError):
+            # resolve() raises RuntimeError on a symlink loop and ValueError on
+            # an embedded NUL byte. A malformed manifest must be REPORTED, not
+            # crash the verifier whose whole job is detecting malformed
+            # manifests -- a crash is indistinguishable from a broken tool.
+            intact = False
+        if not intact:
             mismatched.append(entry["kind"])
     return mismatched
